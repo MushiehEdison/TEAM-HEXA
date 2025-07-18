@@ -1,4 +1,4 @@
-please we have a little issue with our register but will be fixed later 
+please we have a little issue with our register but if you register and you see a page error just go to login and use the infos which you used in registering to login you will have access to your account.
 so to access admin panel 
 username: newstaff
 pass: password
