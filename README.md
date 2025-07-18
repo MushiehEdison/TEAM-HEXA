@@ -9,4 +9,6 @@ dateofbirth:03/10/2005
 or
 email:mushiehedison66@gmail.com
 dateofbirth:2024-07-04
+
+to access the the admin login click on the icon on the home page 
 TEAM HEXA
