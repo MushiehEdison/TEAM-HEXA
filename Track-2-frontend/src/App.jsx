@@ -1,26 +1,159 @@
-import React from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import React, { createContext, useContext, useState, useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import EditProfile from './components/profile';
 import History from './components/history';
 import AllVisits from './components/visits';
 import Home from './home';
+import SignUp from './components/SignUp';
+import SignIn from './components/SignIn';
 
-const App = () => {
+// Auth Context
+const AuthContext = createContext();
 
+export const useAuth = () => useContext(AuthContext);
+
+const AuthProvider = ({ children }) => {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    if (token) {
+      fetch('http://localhost:5000/api/auth/verify', {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then((res) => {
+          if (!res.ok) {
+            throw new Error(`Verification failed: ${res.status}`);
+          }
+          return res.json();
+        })
+        .then((data) => {
+          if (data.user) {
+            setUser(data.user);
+          } else {
+            console.error('No user data in verify response:', data);
+            localStorage.removeItem('token');
+          }
+        })
+        .catch((error) => {
+          console.error('Verify error:', error.message);
+          localStorage.removeItem('token');
+        })
+        .finally(() => setLoading(false));
+    } else {
+      setLoading(false);
+    }
+  }, []);
+
+  const login = (token, userData) => {
+    localStorage.setItem('token', token);
+    setUser(userData);
+  };
+
+  const logout = () => {
+    localStorage.removeItem('token');
+    setUser(null);
+  };
 
   return (
-    <Router>
-        <main className="pt-16 pb-20">
-          <Routes>
-            <Route path="/" element={<Home />} />
-            <Route path="/profile" element={<EditProfile />} />
-            <Route path="/profile/edit" element={<EditProfile isEditing={true} />} />
-            <Route path="/visits" element={<AllVisits />} />
-            <Route path="/history" element={<History />} />
-          </Routes>
-        </main>
-    </Router>
+    <AuthContext.Provider value={{ user, login, logout, loading }}>
+      {children}
+    </AuthContext.Provider>
   );
 };
+
+const ProtectedRoute = ({ children }) => {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-transparent">
+        <div className="flex flex-col items-center space-y-4">
+          <div className="spinner border-4 border-gray-300 border-t-gray-800 rounded-full w-12 h-12 animate-spin"></div>
+          <p className="text-gray-600 text-lg font-semibold animate-pulse">Loading Your Experience...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Navigate to="/signin" replace />;
+  }
+
+  return children;
+};
+
+const App = () => {
+  return (
+    <AuthProvider>
+      <Router>
+        <main className="pt-16 pb-20">
+          <Routes>
+            <Route path="/signin" element={<SignIn />} />
+            <Route path="/signup" element={<SignUp />} />
+            <Route
+              path="/"
+              element={
+                <ProtectedRoute>
+                  <Home />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/profile"
+              element={
+                <ProtectedRoute>
+                  <EditProfile />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/profile/edit"
+              element={
+                <ProtectedRoute>
+                  <EditProfile isEditing={true} />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/visits"
+              element={
+                <ProtectedRoute>
+                  <AllVisits />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/history"
+              element={
+                <ProtectedRoute>
+                  <History />
+                </ProtectedRoute>
+              }
+            />
+          </Routes>
+        </main>
+      </Router>
+    </AuthProvider>
+  );
+};
+
+// Inline CSS for the spinner animation
+const styles = `
+  .spinner {
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+  }
+`;
+
+// Inject styles into the document
+const styleSheet = document.createElement('style');
+styleSheet.textContent = styles;
+document.head.appendChild(styleSheet);
 
 export default App;

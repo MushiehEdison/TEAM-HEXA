@@ -1,14 +1,41 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useContext } from 'react';
 import { Mic, Send, User, Heart, Menu, X, Edit3, Moon, Sun, Phone, Calendar, Activity } from 'lucide-react';
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from 'react-router-dom';
+import { useAuth } from '../../App';
+import { ChatContext } from '../../home';
 
 const Sidebar = ({ isOpen, onClose, isDarkMode }) => {
-  const patientInfo = {
-    name: 'Sarah Johnson',
-    age: 29,
-    language: 'English',
-    condition: 'Diabetes Type 2',
-    lastVisit: '2 days ago'
+  const { user, logout } = useAuth();
+  const { resetMessages } = useContext(ChatContext);
+  const navigate = useNavigate();
+  const [error, setError] = useState(null);
+
+  const handleNewChat = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch('http://localhost:5000/api/auth/conversation/new', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.message || 'Failed to start new conversation');
+      }
+
+      resetMessages();
+      navigate('/');
+      setError(null);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const handleLogout = () => {
+    logout();
+    navigate('/signin');
   };
 
   return (
@@ -42,10 +69,10 @@ const Sidebar = ({ isOpen, onClose, isDarkMode }) => {
             </div>
             <div>
               <h3 className={`text-lg font-medium ${isDarkMode ? 'text-white' : 'text-gray-800'}`}>
-                {patientInfo.name}
+                {user ? user.username : 'Guest'}
               </h3>
               <p className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                Age {patientInfo.age}
+                {user ? user.email : 'Not logged in'}
               </p>
             </div>
           </div>
@@ -55,12 +82,9 @@ const Sidebar = ({ isOpen, onClose, isDarkMode }) => {
               <Link to="/history" className="flex items-center space-x-2 mb-1">
                 <Activity className="w-4 h-4 text-blue-500" />
                 <span className={`text-sm font-medium ${isDarkMode ? 'text-white' : 'text-gray-800'}`}>
-                  Current Condition
+                  Conversation History
                 </span>
               </Link>
-              <p className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                {patientInfo.condition}
-              </p>
             </div>
             
             <div className={`p-3 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
@@ -70,9 +94,6 @@ const Sidebar = ({ isOpen, onClose, isDarkMode }) => {
                   Last Visit
                 </span>
               </Link>
-              <p className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                {patientInfo.lastVisit}
-              </p>
             </div>
             
             <div className={`p-3 rounded-lg ${isDarkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
@@ -82,19 +103,13 @@ const Sidebar = ({ isOpen, onClose, isDarkMode }) => {
                   Language
                 </span>
               </div>
-              <p className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                {patientInfo.language}
-              </p>
             </div>
           </div>
           
           <div className="space-y-3">
             <button 
+              onClick={handleNewChat}
               className="w-full bg-blue-500 hover:bg-blue-600 text-white py-3 px-4 rounded-lg flex items-center justify-center space-x-2 transition-colors"
-              onClick={() => {
-                // Add your new chat functionality here
-                console.log("Starting new chat...");
-              }}
             >
               <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
@@ -106,7 +121,20 @@ const Sidebar = ({ isOpen, onClose, isDarkMode }) => {
               <Edit3 className="w-4 h-4" />
               <span className="font-medium">Edit Profile</span>
             </Link>
+
+            <button
+              onClick={handleLogout}
+              className="w-full bg-gray-200 hover:bg-gray-300 text-gray-800 py-3 px-4 rounded-lg flex items-center justify-center space-x-2 transition-colors"
+            >
+              <span className="font-medium">Logout</span>
+            </button>
           </div>
+
+          {error && (
+            <p className={`text-red-500 text-sm mt-2 animate-fade-in ${isDarkMode ? 'text-red-400' : 'text-red-500'}`}>
+              {error}
+            </p>
+          )}
         </div>
       </div>
     </>
