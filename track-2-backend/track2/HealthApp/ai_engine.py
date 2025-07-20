@@ -1,7 +1,7 @@
 import os
 import logging
 import pandas as pd
-import requests
+from flask import request
 from dotenv import load_dotenv
 from langdetect import detect
 from transformers import pipeline
