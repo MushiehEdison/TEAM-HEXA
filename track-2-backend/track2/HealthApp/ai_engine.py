@@ -1,10 +1,15 @@
 import os
 import logging
 import pandas as pd
+import requests
+import json
+import re
 from flask import request
 from dotenv import load_dotenv
-from langdetect import detect
-from transformers import pipeline
+from datetime import datetime
+from collections import defaultdict
+import difflib
+import uuid
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -15,217 +20,367 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_ENDPOINT = os.getenv("GROQ_ENDPOINT", "https://api.groq.com/openai/v1/chat/completions")
 
-if not GROQ_API_KEY:
-    raise ValueError("GROQ_API_KEY environment variable is not set")
+# Alternative endpoints for failover
+ALTERNATIVE_ENDPOINTS = [
+    "https://api.groq.com/openai/v1/chat/completions",
+    "https://groq.com/api/openai/v1/chat/completions"
+]
 
-# Sentiment analysis pipeline (multilingual)
-sentiment_pipeline = pipeline("sentiment-analysis", model="distilbert-base-multilingual-cased")
+# Enhanced conversation memory structure
+class ConversationMemory:
+    def __init__(self):
+        self.messages = []
+        self.user_preferences = {"language": "en"}  # Default to English
+        self.mentioned_symptoms = set()
+        self.mentioned_conditions = set()
+        self.emotional_state_history = []
+        self.topics_discussed = set()
+        self.user_concerns = []
+        self.follow_up_needed = []
 
-# Load dataset
+    def add_message(self, text, is_user=True, sentiment=None, topics=None):
+        message = {
+            'id': str(uuid.uuid4()),
+            'text': text,
+            'is_user': is_user,
+            'timestamp': datetime.now().isoformat(),
+            'sentiment': sentiment,
+            'topics': topics or []
+        }
+        self.messages.append(message)
+        if is_user and sentiment:
+            self.emotional_state_history.append({
+                'sentiment': sentiment,
+                'timestamp': datetime.now().isoformat()
+            })
+        if topics:
+            self.topics_discussed.update(topics)
+
+    def get_context_summary(self, max_messages=10):
+        """Summarize recent conversation for context"""
+        recent_messages = self.messages[-max_messages:]
+        return {
+            'recent_messages': recent_messages,
+            'symptoms_mentioned': list(self.mentioned_symptoms),
+            'conditions_mentioned': list(self.mentioned_conditions),
+            'emotional_progression': self.emotional_state_history[-5:],
+            'topics_covered': list(self.topics_discussed),
+            'concerns': self.user_concerns,
+            'follow_ups': self.follow_up_needed
+        }
+
+# Global conversation memories (use proper session management in production)
+conversation_memories = defaultdict(ConversationMemory)
+
+# Patterns for entity extraction
+SYMPTOM_PATTERNS = [
+    r'\b(pain|hurt|ache|sore|burning|throbbing|sharp|dull|cramping)\b',
+    r'\b(fever|temperature|hot|chills|sweating)\b',
+    r'\b(nausea|vomit|sick|dizzy|headache|migraine)\b',
+    r'\b(cough|sneeze|runny nose|congestion|sore throat)\b',
+    r'\b(tired|fatigue|exhausted|weak|energy)\b',
+    r'\b(sleep|insomnia|restless|nightmare)\b',
+    r'\b(appetite|eating|weight|stomach)\b',
+    r'\b(breathing|shortness|chest|heart)\b',
+    r'\b(skin|rash|itchy|red|swollen)\b',
+    r'\b(joint|muscle|back|neck|shoulder)\b'
+]
+
+CONDITION_PATTERNS = [
+    r'\b(diabetes|hypertension|blood pressure|sugar)\b',
+    r'\b(malaria|typhoid|cholera|yellow fever)\b',
+    r'\b(asthma|bronchitis|pneumonia|tuberculosis)\b',
+    r'\b(cancer|tumor|growth|lump)\b',
+    r'\b(depression|anxiety|stress|mental health)\b',
+    r'\b(pregnancy|pregnant|expecting|baby)\b',
+    r'\b(allergy|allergic|reaction)\b'
+]
+
+EMOTIONAL_INDICATORS = {
+    'VERY_POSITIVE': r'\b(amazing|fantastic|wonderful|excellent|perfect|thrilled|ecstatic)\b',
+    'POSITIVE': r'\b(good|better|great|happy|pleased|glad|improving|recovering)\b',
+    'NEUTRAL': r'\b(okay|fine|normal|regular|usual|moderate)\b',
+    'CONCERNED': r'\b(worried|concerned|anxious|nervous|unsure|confused)\b',
+    'NEGATIVE': r'\b(bad|worse|terrible|awful|sick|ill|pain|hurt)\b',
+    'VERY_NEGATIVE': r'\b(horrible|unbearable|excruciating|devastating|hopeless|desperate)\b'
+}
+
+# Load clinical dataset
 DATASET_PATH = os.path.join(os.path.dirname(__file__), "clinical_summaries.csv")
 dataset_df = pd.DataFrame()
+dataset_index = {}
+
 try:
     dataset_df = pd.read_csv(DATASET_PATH).dropna(subset=[
         'summary_id', 'patient_id', 'patient_age', 'patient_gender',
         'diagnosis', 'body_temp_c', 'blood_pressure_systolic',
         'heart_rate', 'summary_text', 'date_recorded'
     ])
-except FileNotFoundError:
-    logger.error(f"Dataset file not found at {DATASET_PATH}")
-except pd.errors.EmptyDataError:
-    logger.error("Dataset file is empty or malformed")
+    for idx, row in dataset_df.iterrows():
+        diagnosis = str(row['diagnosis']).lower()
+        summary = str(row['summary_text']).lower()
+        if diagnosis not in dataset_index:
+            dataset_index[diagnosis] = []
+        dataset_index[diagnosis].append(idx)
+        words = re.findall(r'\b\w+\b', summary)
+        for word in words:
+            if len(word) > 3:
+                if word not in dataset_index:
+                    dataset_index[word] = []
+                dataset_index[word].append(idx)
+    logger.info(f"Loaded dataset with {len(dataset_df)} records and indexed {len(dataset_index)} terms")
 except Exception as e:
     logger.error(f"Error loading dataset: {e}")
 
-def detect_language(text):
-    """Detects the language of the input text."""
-    if not text or len(text.strip()) < 3:
-        return "en"
-    try:
-        return detect(text)
-    except:
-        return "en"
+def extract_entities(text):
+    """Extract symptoms, conditions, and topics from user input"""
+    topics, symptoms, conditions = set(), set(), set()
+    text_lower = text.lower()
 
-def detect_sentiment(text):
-    """Detects the sentiment of the input text."""
-    try:
-        result = sentiment_pipeline(text)
-        return result[0]['label']
-    except:
-        return "NEUTRAL"
+    for pattern in SYMPTOM_PATTERNS:
+        matches = re.findall(pattern, text_lower)
+        symptoms.update(matches)
+        if matches:
+            topics.add('symptoms')
 
-def summarize_dataset(diagnosis=None, max_rows=3):
-    """Summarizes clinical dataset records, optionally filtered by diagnosis."""
+    for pattern in CONDITION_PATTERNS:
+        matches = re.findall(pattern, text_lower)
+        conditions.update(matches)
+        if matches:
+            topics.add('medical_conditions')
+
+    if any(word in text_lower for word in ['diet', 'food', 'eat', 'nutrition']):
+        topics.add('nutrition')
+    if any(word in text_lower for word in ['exercise', 'sport', 'physical', 'activity']):
+        topics.add('physical_activity')
+    if any(word in text_lower for word in ['mental', 'stress', 'anxiety', 'depression']):
+        topics.add('mental_health')
+    if any(word in text_lower for word in ['medicine', 'medication', 'drug', 'treatment']):
+        topics.add('medication')
+
+    return topics, symptoms, conditions
+
+def detect_emotional_state(text):
+    """Detect user's emotional state"""
+    text_lower = text.lower()
+    for state, pattern in EMOTIONAL_INDICATORS.items():
+        if re.search(pattern, text_lower):
+            return state
+    return 'NEUTRAL'
+
+def query_dataset(symptoms, conditions, max_records=3):
+    """Query dataset for relevant clinical records"""
     if dataset_df.empty:
-        return "No dataset available."
-    
-    filtered = dataset_df[dataset_df['diagnosis'].str.contains(diagnosis, case=False, na=False)] if diagnosis else dataset_df
-    
-    if filtered.empty:
-        return f"No records found for diagnosis: {diagnosis}" if diagnosis else "No records found."
-    
-    summary_lines = []
-    for _, row in filtered.head(max_rows).iterrows():
-        line = (
-            f"Age: {row.get('patient_age', 'N/A')}, "
-            f"Gender: {row.get('patient_gender', 'N/A')}, "
-            f"Temp: {row.get('body_temp_c', 'N/A')}°C, "
-            f"BP: {row.get('blood_pressure_systolic', 'N/A')}, "
-            f"HR: {row.get('heart_rate', 'N/A')}, "
-            f"Note: {row.get('summary_text', '')}"
-        )
-        summary_lines.append(line)
-    
-    return "\n".join(summary_lines)
+        return []
 
-def build_prompt(user_input, cached_data, diagnosis=None):
-    """Builds a dynamic prompt for the AI model based on user input and cached patient data."""
-    if not user_input:
-        return None, "en"
-    
-    # Extract patient info from cached data
-    patient_info = {
-        "name": cached_data.get('name', 'N/A'),
-        "language": cached_data.get('language', 'en'),
-        "gender": cached_data.get('gender', 'N/A'),
-        "age": cached_data.get('age', 'N/A'),
-        "chronic_conditions": cached_data.get('chronic_conditions', 'None'),
-        "allergies": cached_data.get('allergies', 'None'),
-        "region": cached_data.get('region', 'N/A'),
-        "city": cached_data.get('city', 'N/A'),
-        "profession": cached_data.get('profession', 'N/A'),
-        "marital_status": cached_data.get('marital_status', 'N/A'),
-        "lifestyle": cached_data.get('lifestyle', {})
-    }
-    
-    detected_language = detect_language(user_input)
-    language = patient_info['language'] if patient_info['language'] in ["en", "fr"] else detected_language
-    sentiment = detect_sentiment(user_input)
-    dataset_summary = summarize_dataset(diagnosis)
+    relevant_indices = set()
+    search_terms = list(symptoms) + list(conditions)
 
-    # Dynamic tone based on sentiment
-    tone = {
-        "POSITIVE": "encouraging and supportive",
-        "NEGATIVE": "reassuring and empathetic",
-        "NEUTRAL": "calm and educational"
-    }.get(sentiment.upper(), "calm and educational")
+    for term in search_terms:
+        term_clean = term.lower().strip()
+        if term_clean in dataset_index:
+            relevant_indices.update(dataset_index[term_clean][:3])
 
-    # Adjust explanation complexity based on age and profession
-    explanation_style = "simple and clear"
-    if patient_info['age'] != 'N/A' and isinstance(patient_info['age'], int):
-        if patient_info['age'] < 18:
-            explanation_style = "very simple, using analogies suitable for a young person"
-        elif patient_info['profession'].lower() in ['doctor', 'nurse', 'pharmacist', 'health']:
-            explanation_style = "detailed and technical, but still clear"
+    if not relevant_indices:
+        for term in search_terms:
+            for indexed_term in dataset_index.keys():
+                if difflib.SequenceMatcher(None, term.lower(), indexed_term).ratio() > 0.7:
+                    relevant_indices.update(dataset_index[indexed_term][:2])
 
-    # Dynamic follow-up question based on query content
-    follow_up = "Does this explanation make sense to you, or would you like more details?"
-    if "pain" in user_input.lower() or "hurt" in user_input.lower():
-        follow_up = "Can you tell me more about your symptoms, like how long this has been happening?"
-    elif "diet" in user_input.lower() or "food" in user_input.lower():
-        follow_up = "Would you like some tips on healthy eating that fit your lifestyle?"
-    elif patient_info['chronic_conditions'] != 'None':
-        follow_up = f"How are you managing your {patient_info['chronic_conditions']} right now?"
+    records = []
+    for idx in list(relevant_indices)[:max_records]:
+        row = dataset_df.iloc[idx]
+        records.append({
+            'age': row.get('patient_age', 'N/A'),
+            'gender': row.get('patient_gender', 'N/A'),
+            'diagnosis': row.get('diagnosis', 'N/A'),
+            'vitals': {
+                'temp': row.get('body_temp_c', 'N/A'),
+                'bp': row.get('blood_pressure_systolic', 'N/A'),
+                'hr': row.get('heart_rate', 'N/A')
+            },
+            'summary': str(row.get('summary_text', ''))[:200] + '...'
+        })
+    return records
 
-    # Incorporate lifestyle if available
-    lifestyle_note = ""
-    if patient_info['lifestyle']:
-        if patient_info['lifestyle'].get('smoking', False):
-            lifestyle_note = "Note that the patient smokes, so include advice on reducing health risks related to smoking."
-        if patient_info['lifestyle'].get('exercise', '').lower() == 'sedentary':
-            lifestyle_note = "The patient has a sedentary lifestyle, so suggest gentle physical activity if relevant."
-
-    # Format patient info for prompt
-    patient_info_str = (
-        f"Name: {patient_info['name']}, "
-        f"Age: {patient_info['age']}, "
-        f"Gender: {patient_info['gender']}, "
-        f"Chronic Conditions: {patient_info['chronic_conditions']}, "
-        f"Allergies: {patient_info['allergies']}, "
-        f"Profession: {patient_info['profession']}, "
-        f"Marital Status: {patient_info['marital_status']}, "
-        f"Location: {patient_info['region']}, {patient_info['city']}"
-    )
-
-    if language == "fr":
-        intro = (
-            f"Tu es un assistant médical bienveillant et éducatif pour les patients camerounais. "
-            f"Réponds en français avec un ton {tone}, comme un médecin ou un enseignant attentionné. "
-            f"Adapte tes explications pour être {explanation_style}, en tenant compte du profil du patient."
-        )
-    else:
-        intro = (
-            f"You are a caring and educational medical assistant for Cameroonian patients. "
-            f"Respond in English with a {tone} tone, like a compassionate doctor or teacher. "
-            f"Adapt your explanations to be {explanation_style}, considering the patient's profile."
-        )
-
-    prompt = f"""
-    {intro}
-
-    **Patient Profile**: {patient_info_str}
-    **Context from Dataset**: {dataset_summary or 'No dataset summary found.'}
-    **Patient's Current Sentiment**: {sentiment.lower()}
-    **Patient's Query**: "{user_input}"
-    **Lifestyle Notes**: {lifestyle_note or 'No specific lifestyle information provided.'}
-
-    **Instructions**:
-    - Respond in a warm, supportive manner, tailored to the patient’s profile, location (Cameroon), and sentiment.
-    - Use {explanation_style} language to explain medical terms or concepts, avoiding jargon unless the patient is a healthcare professional.
-    - Incorporate Cameroonian cultural context, such as local health practices (e.g., herbal remedies like ginger tea) or community resources in {patient_info['region']}.
-    - Do not prescribe medications or treatments, but provide general health advice or explanations.
-    - If relevant, reference the patient’s chronic conditions or allergies to personalize advice.
-    - End with a follow-up question to ensure understanding or encourage further discussion: "{follow_up}"
-
-    **Example Response Structure**:
-    - Greet the patient by name and acknowledge their query or sentiment.
-    - Provide a clear, tailored explanation or advice.
-    - Include a culturally relevant suggestion if applicable (e.g., a local remedy or resource).
-    - Close with the follow-up question.
-    """
-    return prompt.strip(), language
-
-def generate_response(user_input, cached_data, diagnosis=None):
-    """Generates a response from the AI model based on user input and cached patient data."""
-    if not user_input:
-        logger.error("User input is empty")
-        return "Error: User input cannot be empty."
-    
-    if not cached_data:
-        logger.error("Cached patient data is missing")
-        return "Error: Patient data is required."
-    
-    logger.info(f"Processing user input: {user_input}")
-    prompt, language = build_prompt(user_input, cached_data, diagnosis)
-    if not prompt:
-        logger.error("Failed to build prompt")
-        return "Error: Unable to process request due to invalid input."
+def call_groq_api(messages, model="llama3-70b-8192", max_tokens=600, temperature=0.8):
+    """Call Grok API with retry logic"""
+    if not GROQ_API_KEY:
+        logger.error("GROQ_API_KEY not set")
+        return None
 
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "User-Agent": "HealthApp/2.1"
     }
     data = {
-        "model": "mixtral-8x7b-32768",
-        "messages": [
-            {"role": "system", "content": "You are a helpful, multilingual health assistant."},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.7
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature
     }
 
-    try:
-        response = requests.post(GROQ_ENDPOINT, headers=headers, json=data)
-        response.raise_for_status()
-        result = response.json()
-        if 'choices' not in result or not result['choices']:
-            logger.error("Invalid response from AI service")
-            return "Error: Invalid response from AI service."
-        logger.info("Successfully generated response")
-        return result['choices'][0]['message']['content'].strip()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to connect to AI service: {e}")
-        return f"Error: Failed to connect to AI service: {e}"
-    except KeyError as e:
-        logger.error(f"Unexpected response format from AI service: {e}")
-        return f"Error: Unexpected response format from AI service: {e}"
+    endpoints = [GROQ_ENDPOINT] + [ep for ep in ALTERNATIVE_ENDPOINTS if ep != GROQ_ENDPOINT]
+    for endpoint in endpoints:
+        try:
+            response = requests.post(endpoint, headers=headers, json=data, timeout=20, verify=True)
+            response.raise_for_status()
+            result = response.json()
+            if 'choices' in result and result['choices']:
+                return result['choices'][0]['message']['content'].strip()
+            logger.warning(f"Endpoint {endpoint} returned no valid choices")
+        except Exception as e:
+            logger.warning(f"Error with {endpoint}: {e}")
+    logger.error("All API endpoints failed")
+    return None
+
+def build_system_prompt(patient_info, context, emotional_state, language):
+    """Build dynamic system prompt for AI"""
+    name = patient_info.get('name', 'Patient')
+    age = patient_info.get('age', 'N/A')
+    region = patient_info.get('region', 'Cameroon')
+
+    recent_messages = context['recent_messages']
+    symptoms = context['symptoms_mentioned']
+    conditions = context['conditions_mentioned']
+    topics = context['topics_covered']
+    emotional_trend = [e['sentiment'] for e in context['emotional_progression']]
+
+    if language == "fr":
+        prompt = f"""Vous êtes Dr. Claude, un assistant médical intelligent et empathique pour les patients camerounais.
+
+**Profil du patient** :
+- Nom : {name}
+- Âge : {age} ans
+- Région : {region}
+- Langue : Français
+
+**Contexte de la conversation** :
+- Messages récents : {len(recent_messages)} échanges
+- Symptômes mentionnés : {', '.join(symptoms) if symptoms else 'Aucun'}
+- Conditions mentionnées : {', '.join(conditions) if conditions else 'Aucune'}
+- Sujets abordés : {', '.join(topics) if topics else 'Aucun'}
+- État émotionnel actuel : {emotional_state}
+- Progression émotionnelle : {', '.join(emotional_trend[-3:]) if emotional_trend else 'Aucune'}
+
+**Instructions** :
+1. Répondez de manière naturelle, empathique et culturellement adaptée au Cameroun.
+2. Utilisez un ton conversationnel, avec des emojis pour exprimer l'empathie (😊, 😔, 🤗, 🙏).
+3. Construisez sur l'historique de la conversation, en évitant les répétitions.
+4. Si des données cliniques sont fournies, utilisez-les uniquement si elles sont pertinentes.
+5. Posez des questions de suivi pertinentes basées sur les symptômes, conditions et émotions.
+6. Si la requête est vague, demandez des précisions pour mieux aider.
+7. Fournissez des conseils pratiques et accessibles, adaptés au contexte camerounais."""
+    else:
+        prompt = f"""You are Dr. Claude, an intelligent and empathetic medical assistant for Cameroonian patients.
+
+**Patient Profile**:
+- Name: {name}
+- Age: {age} years
+- Region: {region}
+- Language: English
+
+**Conversation Context**:
+- Recent messages: {len(recent_messages)} exchanges
+- Symptoms mentioned: {', '.join(symptoms) if symptoms else 'None'}
+- Conditions mentioned: {', '.join(conditions) if conditions else 'None'}
+- Topics discussed: {', '.join(topics) if topics else 'None'}
+- Current emotional state: {emotional_state}
+- Emotional progression: {', '.join(emotional_trend[-3:]) if emotional_trend else 'None'}
+
+**Instructions**:
+1. Respond naturally, empathetically, and in a culturally appropriate manner for Cameroon.
+2. Use a conversational tone, incorporating emojis to express empathy (😊, 😔, 🤗, 🙏).
+3. Build on the conversation history, avoiding repetition.
+4. Use clinical data only if relevant to the mentioned symptoms or conditions.
+5. Ask relevant follow-up questions based on symptoms, conditions, and emotions.
+6. If the query is vague, seek clarification to provide better assistance.
+7. Provide practical, accessible advice tailored to the Cameroonian context."""
+    return prompt
+
+def generate_personalized_response(user_input, patient_info, session_id="default"):
+    """Generate AI-driven, context-aware response"""
+    if not user_input or not patient_info:
+        return "I need more information to assist you properly. Could you share more details? 😊"
+
+    memory = conversation_memories[session_id]
+    memory.user_preferences["language"] = patient_info.get('language', 'en')
+
+    # Extract entities and emotional state
+    topics, symptoms, conditions = extract_entities(user_input)
+    emotional_state = detect_emotional_state(user_input)
+    memory.add_message(user_input, is_user=True, sentiment=emotional_state, topics=topics)
+    memory.mentioned_symptoms.update(symptoms)
+    memory.mentioned_conditions.update(conditions)
+
+    # Get conversation context
+    context = memory.get_context_summary()
+
+    # Query dataset if relevant
+    dataset_records = query_dataset(memory.mentioned_symptoms, memory.mentioned_conditions) if symptoms or conditions else []
+
+    # Build prompt
+    system_prompt = build_system_prompt(patient_info, context, emotional_state, memory.user_preferences["language"])
+    conversation_history = "\n".join([f"{'User' if msg['is_user'] else 'Assistant'}: {msg['text']}" for msg in context['recent_messages'][-5:]])
+    dataset_context = "\n".join([f"Case {i}: {r['diagnosis']} - {r['summary']}" for i, r in enumerate(dataset_records, 1)]) if dataset_records else "No relevant clinical data."
+    
+    full_prompt = f"{conversation_history}\n\nUser: {user_input}\n\nRelevant Clinical Data: {dataset_context}"
+
+    # Call Grok API
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": full_prompt}
+    ]
+    response = call_groq_api(messages)
+
+    if response:
+        memory.add_message(response, is_user=False, sentiment="EMPATHETIC")
+        logger.info("Generated AI response via Grok API")
+        return response
+
+    # Fallback: Construct minimal response with context
+    name = patient_info.get('name', 'Patient')
+    lang = memory.user_preferences["language"]
+    fallback = f"{'Je suis désolé, je rencontre un problème technique.' if lang == 'fr' else 'I’m sorry, I’m having a technical issue.'} "
+    if symptoms:
+        fallback += f"{'Vous avez mentionné ' if lang == 'fr' else 'You mentioned '} {', '.join(list(symptoms)[:2])}. "
+    fallback += f"{'Parlez-moi plus de ce que vous ressentez pour que je puisse mieux vous aider 😊' if lang == 'fr' else 'Tell me more about how you’re feeling so I can assist you better 😊'}"
+    memory.add_message(fallback, is_user=False, sentiment="EMPATHETIC")
+    return fallback
+
+def test_conversation_flow():
+    """Test the AI-driven conversation system"""
+    print("🧪 Testing AI Medical Assistant\n")
+    test_patient = {
+        'name': 'Marie Ngozi',
+        'age': 28,
+        'language': 'en',
+        'region': 'Douala',
+        'chronic_conditions': 'None'
+    }
+    test_conversations = [
+        "I'm having headaches lately",
+        "It's worse in the evenings and I feel nauseous",
+        "I’m feeling a bit better today, but still worried",
+        "Thank you for your help!"
+    ]
+    session_id = "test_session"
+
+    print("📱 Conversation Simulation:")
+    print("=" * 50)
+    for i, message in enumerate(test_conversations, 1):
+        print(f"\n👤 User (Message {i}): {message}")
+        response = generate_personalized_response(message, test_patient, session_id)
+        print(f"🤖 Dr. Claude: {response}")
+        print("-" * 30)
+
+    memory = conversation_memories[session_id]
+    print(f"\n🧠 Conversation Memory Summary:")
+    print(f"Total messages: {len(memory.messages)}")
+    print(f"Symptoms: {memory.mentioned_symptoms}")
+    print(f"Emotional progression: {[e['sentiment'] for e in memory.emotional_state_history]}")
+    print(f"Topics: {memory.topics_discussed}")
+
+if __name__ == "__main__":
+    test_conversation_flow()

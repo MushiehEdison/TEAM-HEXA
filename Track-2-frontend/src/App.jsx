@@ -7,58 +7,71 @@ import Home from './home';
 import SignUp from './components/SignUp';
 import SignIn from './components/SignIn';
 
-// Auth Context
 const AuthContext = createContext();
 
 export const useAuth = () => useContext(AuthContext);
 
 const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
+  const [token, setToken] = useState(localStorage.getItem('token') || null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = localStorage.getItem('token');
+    console.log('AuthProvider useEffect: Checking token', token);
     if (token) {
       fetch('http://localhost:5000/api/auth/verify', {
         method: 'GET',
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       })
         .then((res) => {
+          console.log('Verify response status:', res.status);
           if (!res.ok) {
             throw new Error(`Verification failed: ${res.status}`);
           }
           return res.json();
         })
         .then((data) => {
+          console.log('Verify response data:', data);
           if (data.user) {
             setUser(data.user);
+            setToken(token); // Ensure token is set
           } else {
             console.error('No user data in verify response:', data);
             localStorage.removeItem('token');
+            setToken(null);
           }
         })
         .catch((error) => {
           console.error('Verify error:', error.message);
           localStorage.removeItem('token');
+          setToken(null);
         })
-        .finally(() => setLoading(false));
+        .finally(() => {
+          setLoading(false);
+          console.log('Auth loading complete, user:', user, 'token:', token);
+        });
     } else {
       setLoading(false);
+      console.log('No token found, auth loading complete');
     }
-  }, []);
+  }, [token]);
 
-  const login = (token, userData) => {
-    localStorage.setItem('token', token);
+  const login = (newToken, userData) => {
+    console.log('Logging in with token:', newToken, 'user:', userData);
+    localStorage.setItem('token', newToken);
+    setToken(newToken);
     setUser(userData);
   };
 
   const logout = () => {
+    console.log('Logging out');
     localStorage.removeItem('token');
+    setToken(null);
     setUser(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, loading }}>
+    <AuthContext.Provider value={{ user, token, login, logout, loading }}>
       {children}
     </AuthContext.Provider>
   );
@@ -79,6 +92,7 @@ const ProtectedRoute = ({ children }) => {
   }
 
   if (!user) {
+    console.log('ProtectedRoute: No user, redirecting to /signin');
     return <Navigate to="/signin" replace />;
   }
 
@@ -140,7 +154,6 @@ const App = () => {
   );
 };
 
-// Inline CSS for the spinner animation
 const styles = `
   .spinner {
     animation: spin 1s linear infinite;
@@ -151,7 +164,6 @@ const styles = `
   }
 `;
 
-// Inject styles into the document
 const styleSheet = document.createElement('style');
 styleSheet.textContent = styles;
 document.head.appendChild(styleSheet);
