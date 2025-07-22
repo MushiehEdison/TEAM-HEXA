@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, createContext } from 'react';
 import { Mic, Send, User, Heart, Menu, X, Edit3, Moon, Sun, Phone, Calendar, Activity, WifiOff } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useParams, useNavigate } from 'react-router-dom';
 import SpeechRecognition, { useSpeechRecognition } from 'react-speech-recognition';
 import StatusIndicator from './components/homepagecomponents/StatusIndicator';
 import MessageBubble from './components/homepagecomponents/MessageBubble';
@@ -13,21 +13,10 @@ import { useAuth } from './App';
 export const ChatContext = createContext();
 
 const Home = () => {
-  const { user, loading } = useAuth();
-  const [messages, setMessages] = useState(() => {
-    // Load messages from localStorage if available
-    const savedMessages = localStorage.getItem('chatMessages');
-    return savedMessages
-      ? JSON.parse(savedMessages)
-      : [
-          {
-            id: 'msg-1',
-            text: "Hello! I'm your AI healthcare assistant. How can I help you today?",
-            isUser: false,
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          },
-        ];
-  });
+  const { user, token, loading } = useAuth();
+  const { conversationId } = useParams();
+  const navigate = useNavigate();
+  const [messages, setMessages] = useState([]);
   const [isListening, setIsListening] = useState(false);
   const [status, setStatus] = useState('');
   const [showStatus, setShowStatus] = useState(false);
@@ -36,7 +25,7 @@ const Home = () => {
   const [networkStatus, setNetworkStatus] = useState(navigator.onLine ? 'online' : 'offline');
   const messagesEndRef = useRef(null);
   const silenceTimerRef = useRef(null);
-  const messageIdCounter = useRef(messages.length + 1); // Initialize based on loaded messages
+  const messageIdCounter = useRef(1);
 
   const { transcript, interimTranscript, finalTranscript, resetTranscript, listening } = useSpeechRecognition();
 
@@ -45,26 +34,22 @@ const Home = () => {
   };
 
   const scrollToBottom = () => {
+    console.log('Scrolling to bottom, messages length:', messages.length);
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  // Function to reset messages to the default state
   const resetMessages = () => {
-    const defaultMessage = {
-      id: 'msg-1',
-      text: "Hello! I'm your AI healthcare assistant. How can I help you today?",
-      isUser: false,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    };
-    setMessages([defaultMessage]);
-    messageIdCounter.current = 2;
-    localStorage.removeItem('chatMessages'); // Clear saved messages
+    console.log('Resetting messages');
+    setMessages([]);
+    messageIdCounter.current = 1;
+    localStorage.removeItem('chatMessages');
   };
 
-  // Function to handle microphone toggle
   const handleToggleListening = () => {
+    console.log('Toggling listening:', isListening ? 'Stopping' : 'Starting');
     if (networkStatus === 'offline') {
-      return; // Don't allow voice input when offline
+      console.log('Cannot toggle listening: Offline');
+      return;
     }
 
     if (isListening) {
@@ -85,64 +70,64 @@ const Home = () => {
     }
   };
 
-  // Save messages to localStorage whenever they change
   useEffect(() => {
+    console.log('Saving messages to localStorage:', messages);
     localStorage.setItem('chatMessages', JSON.stringify(messages));
   }, [messages]);
 
-  // Fetch messages from server only if localStorage is empty
   useEffect(() => {
-    if (!user || loading) return;
-    const savedMessages = localStorage.getItem('chatMessages');
-    if (savedMessages && JSON.parse(savedMessages).length > 1) {
-      // If local messages exist and are more than the default message, skip server fetch
+    if (!user || loading || !token) {
+      console.log('Skipping fetch: user, loading, or token missing', { user, loading, token });
       return;
     }
 
-    const token = localStorage.getItem('token');
-    fetch('http://localhost:5000/api/auth/conversation', {
+    // Validate conversationId is an integer
+    const isValidId = conversationId && /^\d+$/.test(conversationId);
+    console.log('Fetching messages for conversationId:', conversationId, 'Valid:', isValidId);
+    const url = isValidId 
+      ? `http://localhost:5000/api/auth/conversation/${conversationId}`
+      : 'http://localhost:5000/api/auth/conversation';
+
+    fetch(url, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${token}`,
       },
     })
       .then((res) => {
-        if (!res.ok) throw new Error('Failed to fetch messages');
+        console.log('Fetch response status:', res.status);
+        if (!res.ok) {
+          throw new Error(`Failed to fetch messages: ${res.status}`);
+        }
         return res.json();
       })
       .then((data) => {
-        const fetchedMessages = data.messages.length
+        console.log('Fetched messages data:', data);
+        const fetchedMessages = data.messages && Array.isArray(data.messages)
           ? data.messages.map((msg, index) => ({
               ...msg,
-              id: `msg-${index + 1}`,
+              id: msg.id || `msg-${index + 1}`,
+              timestamp: msg.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
             }))
-          : [
-              {
-                id: 'msg-1',
-                text: "Hello! I'm your AI healthcare assistant. How can I help you today?",
-                isUser: false,
-                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-              },
-            ];
+          : [];
+        console.log('Setting messages:', fetchedMessages);
         setMessages(fetchedMessages);
         messageIdCounter.current = fetchedMessages.length + 1;
+        if (!isValidId && data.id) {
+          console.log('Navigating to valid conversation ID:', data.id);
+          navigate(`/chat/${data.id}`);
+        }
       })
       .catch((error) => {
         console.error('Error fetching messages:', error);
-        // Fallback to default message if fetch fails
-        if (!savedMessages) {
-          setMessages([
-            {
-              id: 'msg-1',
-              text: "Hello! I'm your AI healthcare assistant. How can I help you today?",
-              isUser: false,
-              timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-            },
-          ]);
-          messageIdCounter.current = 2;
+        setMessages([]);
+        messageIdCounter.current = 1;
+        if (!isValidId) {
+          console.log('Invalid conversationId, clearing local storage');
+          localStorage.removeItem('chatMessages');
         }
       });
-  }, [user, loading]);
+  }, [user, loading, token, conversationId, navigate]);
 
   useEffect(() => {
     scrollToBottom();
@@ -150,6 +135,7 @@ const Home = () => {
 
   useEffect(() => {
     if (finalTranscript.trim()) {
+      console.log('Final transcript received:', finalTranscript);
       if (silenceTimerRef.current) {
         clearTimeout(silenceTimerRef.current);
       }
@@ -159,7 +145,7 @@ const Home = () => {
         if (isListening && networkStatus === 'online') {
           SpeechRecognition.startListening({ continuous: true, interimResults: true, language: 'en-US' });
         }
-      }, 3000); // 3 seconds of silence
+      }, 3000);
     }
   }, [finalTranscript, isListening, networkStatus]);
 
@@ -188,73 +174,93 @@ const Home = () => {
     };
   }, [isListening]);
 
-const handleSendMessage = (text) => {
-  const token = localStorage.getItem('token');
-  const newMessage = {
-    id: generateUniqueId(),
-    text,
-    isUser: true,
-    timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-  };
-  setMessages((prev) => [...prev, newMessage]);
+  const handleSendMessage = (text) => {
+    console.log('handleSendMessage called with text:', text);
+    const token = localStorage.getItem('token');
+    if (!token) {
+      console.error('No token found in localStorage');
+      setMessages((prev) => [...prev, {
+        id: generateUniqueId(),
+        text: 'Please sign in to send messages.',
+        isUser: false,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      }]);
+      return;
+    }
 
-  // Show loading status
-  setStatus('framing...');
-  setShowStatus(true);
+    const newMessage = {
+      id: generateUniqueId(),
+      text,
+      isUser: true,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+    console.log('Adding user message to state:', newMessage);
+    setMessages((prev) => [...prev, newMessage]);
 
-  fetch('http://localhost:5000/api/auth/conversation', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${token}`,
-    },
-    body: JSON.stringify({ message: text }),
-  })
-    .then((res) => {
-      if (!res.ok) throw new Error('Failed to send message');
-      return res.json();
+    setStatus('framing...');
+    setShowStatus(true);
+
+    const isValidId = conversationId && /^\d+$/.test(conversationId);
+    const url = isValidId 
+      ? `http://localhost:5000/api/auth/conversation/${conversationId}`
+      : 'http://localhost:5000/api/auth/conversation';
+
+    console.log('Sending POST request to:', url, 'with body:', { message: text });
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({ message: text }),
     })
-    .then((data) => {
-      console.log('Server response:', data); // Debug log
-      setShowStatus(false);
-      
-      // Use the messages from the server response
-      if (data.messages && Array.isArray(data.messages) && data.messages.length > 0) {
-        // Update the entire messages array with server data
-        const formattedMessages = data.messages.map((msg, index) => ({
-          ...msg,
-          id: msg.id || `msg-${index + 1}`,
-          timestamp: msg.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        }));
-        setMessages(formattedMessages);
-        messageIdCounter.current = formattedMessages.length + 1;
-        console.log('Updated messages:', formattedMessages);
-      } else {
-        console.error('Invalid response format:', data);
-        // Fallback to showing an error message
+      .then((res) => {
+        console.log('POST response status:', res.status);
+        if (!res.ok) {
+          throw new Error(`Failed to send message: ${res.status} ${res.statusText}`);
+        }
+        return res.json();
+      })
+      .then((data) => {
+        console.log('POST response data:', data);
+        setShowStatus(false);
+        if (data.messages && Array.isArray(data.messages)) {
+          const formattedMessages = data.messages.map((msg, index) => ({
+            ...msg,
+            id: msg.id || `msg-${index + 1}`,
+            timestamp: msg.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          }));
+          console.log('Setting formatted messages:', formattedMessages);
+          setMessages(formattedMessages);
+          messageIdCounter.current = formattedMessages.length + 1;
+          if (!isValidId && data.id) {
+            console.log('Navigating to new conversation ID:', data.id);
+            navigate(`/chat/${data.id}`);
+          }
+        } else {
+          console.error('No valid messages in response:', data);
+          const errorResponse = {
+            id: generateUniqueId(),
+            text: 'I apologize, but I encountered an issue processing your request. Please try again.',
+            isUser: false,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          };
+          setMessages((prev) => [...prev, errorResponse]);
+        }
+      })
+      .catch((error) => {
+        console.error('Error sending message:', error);
+        setShowStatus(false);
+        setMessages((prev) => [...prev]);
         const errorResponse = {
           id: generateUniqueId(),
-          text: "I apologize, but I encountered an issue processing your request. Please try again.",
+          text: `Failed to connect to server: ${error.message}. Your message was sent but not saved. Please try again.`,
           isUser: false,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
         setMessages((prev) => [...prev, errorResponse]);
-      }
-    })
-    .catch((error) => {
-      console.error('Error sending message:', error);
-      setShowStatus(false);
-      
-      // Show error message to user
-      const errorResponse = {
-        id: generateUniqueId(),
-        text: "I apologize, but I'm having trouble connecting right now. Please check your internet connection and try again.",
-        isUser: false,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      };
-      setMessages((prev) => [...prev, errorResponse]);
-    });
-};
+      });
+  };
 
   return (
     <ChatContext.Provider value={{ resetMessages }}>

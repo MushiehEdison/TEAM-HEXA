@@ -26,7 +26,7 @@ const Sidebar = ({ isOpen, onClose, isDarkMode }) => {
       }
 
       resetMessages();
-      navigate('/');
+      navigate(`/chat/${data.id}`);
       setError(null);
     } catch (err) {
       setError(err.message);

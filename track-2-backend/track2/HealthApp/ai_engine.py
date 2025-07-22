@@ -4,7 +4,6 @@ import pandas as pd
 import requests
 import json
 import re
-from flask import request
 from dotenv import load_dotenv
 from datetime import datetime
 from collections import defaultdict
@@ -56,6 +55,25 @@ class ConversationMemory:
         if topics:
             self.topics_discussed.update(topics)
 
+    def load_history(self, messages):
+        """Load conversation history from database"""
+        self.messages = []
+        self.mentioned_symptoms = set()
+        self.mentioned_conditions = set()
+        self.emotional_state_history = []
+        self.topics_discussed = set()
+        for msg in messages:
+            topics, symptoms, conditions = extract_entities(msg['text'])
+            sentiment = detect_emotional_state(msg['text']) if msg.get('isUser') else 'EMPATHETIC'
+            self.add_message(
+                text=msg['text'],
+                is_user=msg.get('isUser', False),
+                sentiment=sentiment,
+                topics=topics
+            )
+            self.mentioned_symptoms.update(symptoms)
+            self.mentioned_conditions.update(conditions)
+
     def get_context_summary(self, max_messages=10):
         """Summarize recent conversation for context"""
         recent_messages = self.messages[-max_messages:]
@@ -69,7 +87,7 @@ class ConversationMemory:
             'follow_ups': self.follow_up_needed
         }
 
-# Global conversation memories (use proper session management in production)
+# Global conversation memories
 conversation_memories = defaultdict(ConversationMemory)
 
 # Patterns for entity extraction
@@ -299,13 +317,17 @@ def build_system_prompt(patient_info, context, emotional_state, language):
 7. Provide practical, accessible advice tailored to the Cameroonian context."""
     return prompt
 
-def generate_personalized_response(user_input, patient_info, session_id="default"):
+def generate_personalized_response(user_input, patient_info, session_id="default", history=None):
     """Generate AI-driven, context-aware response"""
     if not user_input or not patient_info:
         return "I need more information to assist you properly. Could you share more details? 😊"
 
     memory = conversation_memories[session_id]
     memory.user_preferences["language"] = patient_info.get('language', 'en')
+
+    # Initialize memory with database history if provided
+    if history:
+        memory.load_history(history)
 
     # Extract entities and emotional state
     topics, symptoms, conditions = extract_entities(user_input)
@@ -371,8 +393,8 @@ def test_conversation_flow():
     print("=" * 50)
     for i, message in enumerate(test_conversations, 1):
         print(f"\n👤 User (Message {i}): {message}")
-        response = generate_personalized_response(message, test_patient, session_id)
-        print(f"🤖 Dr. Claude: {response}")
+        response = generate_personalized_response(message, test_patient, session_id, [])
+        print(f"🤖 Dr. Healia: {response}")
         print("-" * 30)
 
     memory = conversation_memories[session_id]

@@ -33,7 +33,7 @@ const AuthProvider = ({ children }) => {
         .then((data) => {
           console.log('Verify response data:', data);
           if (data.user) {
-            setUser(data.user);
+            setUser(data.user); // Set user data
             setToken(token); // Ensure token is set
           } else {
             console.error('No user data in verify response:', data);
@@ -54,7 +54,7 @@ const AuthProvider = ({ children }) => {
       setLoading(false);
       console.log('No token found, auth loading complete');
     }
-  }, [token]);
+  }, [token]); // Dependency on token only
 
   const login = (newToken, userData) => {
     console.log('Logging in with token:', newToken, 'user:', userData);
@@ -109,6 +109,22 @@ const App = () => {
             <Route path="/signup" element={<SignUp />} />
             <Route
               path="/"
+              element={
+                <ProtectedRoute>
+                  <Home />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/chat"
+              element={
+                <ProtectedRoute>
+                  <Home />
+                </ProtectedRoute>
+              }
+            />
+            <Route
+              path="/chat/:conversationId"
               element={
                 <ProtectedRoute>
                   <Home />
