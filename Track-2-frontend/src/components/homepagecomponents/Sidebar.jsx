@@ -13,11 +13,17 @@ const Sidebar = ({ isOpen, onClose, isDarkMode }) => {
   const handleNewChat = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await fetch('http://localhost:5000/api/auth/conversation/new', {
+      if (!token) {
+        throw new Error('No authentication token found');
+      }
+
+      const response = await fetch('http://localhost:5000/api/auth/conversation', {
         method: 'POST',
         headers: {
+          'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`,
         },
+        body: JSON.stringify({ message: '', isMicInput: false }), // Send empty message to create new conversation
       });
 
       const data = await response.json();
@@ -30,6 +36,7 @@ const Sidebar = ({ isOpen, onClose, isDarkMode }) => {
       setError(null);
     } catch (err) {
       setError(err.message);
+      console.error('Error creating new chat:', err.message);
     }
   };
 
@@ -69,7 +76,7 @@ const Sidebar = ({ isOpen, onClose, isDarkMode }) => {
             </div>
             <div>
               <h3 className={`text-lg font-medium ${isDarkMode ? 'text-white' : 'text-gray-800'}`}>
-                {user ? user.username : 'Guest'}
+                {user ? user.name : 'Guest'}
               </h3>
               <p className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
                 {user ? user.email : 'Not logged in'}

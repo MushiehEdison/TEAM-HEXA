@@ -19,12 +19,6 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_ENDPOINT = os.getenv("GROQ_ENDPOINT", "https://api.groq.com/openai/v1/chat/completions")
 
-# Alternative endpoints for failover
-ALTERNATIVE_ENDPOINTS = [
-    "https://api.groq.com/openai/v1/chat/completions",
-    "https://groq.com/api/openai/v1/chat/completions"
-]
-
 # Enhanced conversation memory structure
 class ConversationMemory:
     def __init__(self):
@@ -222,9 +216,9 @@ def query_dataset(symptoms, conditions, max_records=3):
     return records
 
 def call_groq_api(messages, model="llama3-70b-8192", max_tokens=600, temperature=0.8):
-    """Call Grok API with retry logic"""
+    """Call Grok API with improved error handling"""
     if not GROQ_API_KEY:
-        logger.error("GROQ_API_KEY not set")
+        logger.error("GROQ_API_KEY is not set in environment variables")
         return None
 
     headers = {
@@ -239,19 +233,26 @@ def call_groq_api(messages, model="llama3-70b-8192", max_tokens=600, temperature
         "temperature": temperature
     }
 
-    endpoints = [GROQ_ENDPOINT] + [ep for ep in ALTERNATIVE_ENDPOINTS if ep != GROQ_ENDPOINT]
-    for endpoint in endpoints:
-        try:
-            response = requests.post(endpoint, headers=headers, json=data, timeout=20, verify=True)
-            response.raise_for_status()
-            result = response.json()
-            if 'choices' in result and result['choices']:
-                return result['choices'][0]['message']['content'].strip()
-            logger.warning(f"Endpoint {endpoint} returned no valid choices")
-        except Exception as e:
-            logger.warning(f"Error with {endpoint}: {e}")
-    logger.error("All API endpoints failed")
-    return None
+    try:
+        logger.debug(f"Sending request to {GROQ_ENDPOINT} with model {model}")
+        response = requests.post(GROQ_ENDPOINT, headers=headers, json=data, timeout=20, verify=True)
+        response.raise_for_status()
+        result = response.json()
+        if 'choices' in result and result['choices']:
+            content = result['choices'][0]['message']['content'].strip()
+            logger.info("Successfully received response from Grok API")
+            return content
+        logger.warning("No valid choices in API response")
+        return None
+    except requests.exceptions.HTTPError as http_err:
+        logger.error(f"HTTP error occurred: {http_err}, Response: {response.text if response else 'No response'}")
+        return None
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"Request error occurred: {req_err}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return None
 
 def build_system_prompt(patient_info, context, emotional_state, language):
     """Build dynamic system prompt for AI"""
@@ -358,17 +359,18 @@ def generate_personalized_response(user_input, patient_info, session_id="default
 
     if response:
         memory.add_message(response, is_user=False, sentiment="EMPATHETIC")
-        logger.info("Generated AI response via Grok API")
+        logger.info(f"Generated AI response: {response[:100]}...")
         return response
 
     # Fallback: Construct minimal response with context
     name = patient_info.get('name', 'Patient')
     lang = memory.user_preferences["language"]
-    fallback = f"{'Je suis désolé, je rencontre un problème technique.' if lang == 'fr' else 'I’m sorry, I’m having a technical issue.'} "
+    fallback = f"{'Je suis désolé, je rencontre un problème technique.' if lang == 'fr' else 'I’m sorry, I’m unable to connect to the AI service at the moment.'} "
     if symptoms:
         fallback += f"{'Vous avez mentionné ' if lang == 'fr' else 'You mentioned '} {', '.join(list(symptoms)[:2])}. "
-    fallback += f"{'Parlez-moi plus de ce que vous ressentez pour que je puisse mieux vous aider 😊' if lang == 'fr' else 'Tell me more about how you’re feeling so I can assist you better 😊'}"
+    fallback += f"{'Parlez-moi plus de ce que vous ressentez pour que je puisse mieux vous aider 😊' if lang == 'fr' else 'Please tell me more about how you’re feeling so I can assist you better 😊'}"
     memory.add_message(fallback, is_user=False, sentiment="EMPATHETIC")
+    logger.warning(f"Fallback response generated: {fallback}")
     return fallback
 
 def test_conversation_flow():

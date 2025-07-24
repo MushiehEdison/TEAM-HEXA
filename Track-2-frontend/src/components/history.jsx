@@ -33,7 +33,7 @@ const History = () => {
         const { conversations, total, pages } = await response.json();
         const transformedConversations = conversations.map(conv => ({
           id: conv.id,
-          title: conv.title || 'Untitled Conversation',
+          title: conv.title,
           date: new Date(conv.updated_at || conv.created_at).toLocaleDateString('en-US', {
             year: 'numeric',
             month: 'long',
@@ -44,8 +44,7 @@ const History = () => {
             minute: 'numeric',
             hour12: true
           }),
-          preview: conv.preview || 'No messages yet',
-          message_count: conv.message_count || 0
+          preview: conv.preview
         }));
         setConversations(prev => page === 1 ? transformedConversations : [...prev, ...transformedConversations]);
         setHasMore(page < pages);
@@ -59,7 +58,8 @@ const History = () => {
   }, [token, authLoading, page]);
 
   const filteredConversations = conversations.filter(conversation =>
-    conversation.title.toLowerCase().includes(searchTerm.toLowerCase())
+    conversation.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    conversation.preview.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   const handleNewConversation = async () => {
@@ -70,12 +70,13 @@ const History = () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch('http://localhost:5000/api/auth/conversation/new', {
+      const response = await fetch('http://localhost:5000/api/auth/conversation', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
-        }
+        },
+        body: JSON.stringify({ message: '', isMicInput: false })
       });
       if (!response.ok) {
         const errorData = await response.json();
@@ -170,9 +171,6 @@ const History = () => {
                     <span>{conversation.time}</span>
                   </div>
                 </div>
-              </div>
-              <div className="flex justify-between items-center mt-4">
-                <span className="text-sm text-gray-500">{conversation.message_count} messages</span>
               </div>
             </div>
           ))}

@@ -2,11 +2,12 @@ from flask import Blueprint, request, jsonify, current_app
 from flask_cors import CORS
 import jwt
 import datetime
+import uuid
+import logging
 from . import db, bcrypt
 from .models import User, Conversation
 from .ai_engine import generate_personalized_response
-import logging
-import uuid
+from .speech import generate_tts_audio
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -14,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize Blueprint
 auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
-CORS(auth_bp, origins=["http://localhost:3000", "http://localhost:5173"], supports_credentials=True)
+CORS(auth_bp, origins=["http://localhost:5173"], supports_credentials=True)
 
 def verify_user_from_token(auth_header):
     """Verify user from JWT token in Authorization header."""
@@ -44,152 +45,110 @@ def verify_user_from_token(auth_header):
 @auth_bp.route('/signup', methods=['POST'])
 def signup():
     """Handle user signup."""
-    logger.debug("Received signup request")
     try:
         data = request.get_json()
-    except Exception as e:
-        logger.error(f"Invalid JSON input: {str(e)}")
-        return jsonify({'message': 'Invalid JSON format'}), 400
-    logger.debug(f"Request data: {data}")
-    required_fields = ['name', 'username', 'email', 'password', 'phone', 'language', 'gender']
-    
-    if not all(field in data for field in required_fields):
-        logger.error("Missing required fields")
-        return jsonify({'message': 'Missing required fields'}), 400
+        logger.debug(f"Signup data received: {data}")
+        if not data or not all(k in data for k in ['name', 'email', 'password', 'language', 'gender']):
+            logger.error("Missing required fields")
+            return jsonify({'message': 'Missing required fields'}), 400
 
-    if len(data['name']) < 2 or len(data['name']) > 120:
-        logger.error("Invalid name length")
-        return jsonify({'message': 'Name must be 2-120 characters'}), 400
-    if len(data['username']) < 3 or len(data['username']) > 20:
-        logger.error("Invalid username length")
-        return jsonify({'message': 'Username must be 3-20 characters'}), 400
-    if not data['username'].replace('_', '').replace('-', '').isalnum():
-        logger.error("Invalid username characters")
-        return jsonify({'message': 'Username can only contain letters, numbers, underscores, or hyphens'}), 400
-    if User.query.filter_by(username=data['username']).first():
-        logger.error("Username already exists")
-        return jsonify({'message': 'Username already exists'}), 400
-    if User.query.filter_by(email=data['email']).first():
-        logger.error("Email already exists")
-        return jsonify({'message': 'Email already exists'}), 400
-    if not data['email'] or not '@' in data['email'] or len(data['email']) > 120:
-        logger.error("Invalid email format")
-        return jsonify({'message': 'Invalid email format'}), 400
-    if len(data['password']) < 8:
-        logger.error("Password too short")
-        return jsonify({'message': 'Password must be at least 8 characters'}), 400
-    if len(data['phone']) > 15:
-        logger.error("Phone number too long")
-        return jsonify({'message': 'Phone number cannot exceed 15 characters'}), 400
-    if User.query.filter_by(phone=data['phone']).first():
-        logger.error("Phone number already exists")
-        return jsonify({'message': 'Phone number already exists'}), 400
-    if len(data['language']) > 32:
-        logger.error("Language too long")
-        return jsonify({'message': 'Language cannot exceed 32 characters'}), 400
-    if data['gender'] not in ['Male', 'Female', 'Other']:
-        logger.error("Invalid gender selection")
-        return jsonify({'message': 'Invalid gender selection'}), 400
+        if User.query.filter_by(email=data['email']).first():
+            logger.error("Email already exists")
+            return jsonify({'message': 'Email already exists'}), 400
 
-    try:
         hashed_password = bcrypt.generate_password_hash(data['password']).decode('utf-8')
-        logger.debug("Password hashed")
         new_user = User(
             name=data['name'],
-            username=data['username'],
             email=data['email'],
             password=hashed_password,
-            phone=data['phone'],
             language=data['language'],
             gender=data['gender']
         )
         db.session.add(new_user)
         db.session.commit()
-        logger.debug("User created successfully")
-        token = jwt.encode(
-            {
-                'user_id': new_user.id,
-                'exp': datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=24)
-            },
-            current_app.config['SECRET_KEY'],
-            algorithm='HS256'
-        )
-        logger.debug(f"JWT token generated: {token}")
+        logger.debug(f"User created: {new_user.id}")
+
+        token = jwt.encode({
+            'user_id': new_user.id,
+            'exp': datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
+        }, current_app.config['SECRET_KEY'], algorithm='HS256')
+
         return jsonify({
+            'message': 'User created successfully',
             'token': token,
             'user': {
                 'id': new_user.id,
-                'username': new_user.username,
-                'email': new_user.email
+                'name': new_user.name,
+                'email': new_user.email,
+                'language': new_user.language,
+                'gender': new_user.gender
             }
         }), 201
+
     except Exception as e:
         db.session.rollback()
-        logger.error(f"Error creating user: {str(e)}")
-        return jsonify({'message': f'Error creating user: {str(e)}'}), 500
+        logger.error(f"Error during signup: {str(e)}")
+        return jsonify({'message': f'Error: {str(e)}'}), 500
 
 @auth_bp.route('/signin', methods=['POST'])
 def signin():
     """Handle user signin."""
-    logger.debug("Received signin request")
     try:
         data = request.get_json()
-    except Exception as e:
-        logger.error(f"Invalid JSON input: {str(e)}")
-        return jsonify({'message': 'Invalid JSON format'}), 400
-    logger.debug(f"Request data: {data}")
-    if not data or 'email' not in data or 'password' not in data:
-        logger.error("Email and password are required")
-        return jsonify({'message': 'Email and password are required'}), 400
+        logger.debug(f"Signin data received: {data}")
+        if not data or not all(k in data for k in ['email', 'password']):
+            logger.error("Missing email or password")
+            return jsonify({'message': 'Missing email or password'}), 400
 
-    try:
         user = User.query.filter_by(email=data['email']).first()
-        logger.debug(f"User query result: {user}")
         if not user or not bcrypt.check_password_hash(user.password, data['password']):
             logger.error("Invalid credentials")
             return jsonify({'message': 'Invalid credentials'}), 401
 
-        token = jwt.encode(
-            {
-                'user_id': user.id,
-                'exp': datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=24)
-            },
-            current_app.config['SECRET_KEY'],
-            algorithm='HS256'
-        )
-        logger.debug(f"JWT token generated: {token}")
+        token = jwt.encode({
+            'user_id': user.id,
+            'exp': datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
+        }, current_app.config['SECRET_KEY'], algorithm='HS256')
+
+        logger.debug(f"User signed in: {user.id}")
         return jsonify({
+            'message': 'Signed in successfully',
             'token': token,
             'user': {
                 'id': user.id,
-                'username': user.username,
-                'email': user.email
+                'name': user.name,
+                'email': user.email,
+                'language': user.language,
+                'gender': user.gender
             }
         }), 200
+
     except Exception as e:
         logger.error(f"Error during signin: {str(e)}")
-        return jsonify({'message': f'Error during signin: {str(e)}'}), 500
+        return jsonify({'message': f'Error: {str(e)}'}), 500
 
 @auth_bp.route('/verify', methods=['GET'])
 def verify():
     """Verify user token."""
-    logger.debug("Received verify request")
     user = verify_user_from_token(request.headers.get('Authorization'))
     if not user:
         logger.error("Invalid or missing token")
         return jsonify({'message': 'Invalid or missing token'}), 401
-    logger.debug("User verified successfully")
+
+    logger.debug(f"Token verified for user: {user.id}")
     return jsonify({
         'user': {
             'id': user.id,
-            'username': user.username,
-            'email': user.email
+            'name': user.name,
+            'email': user.email,
+            'language': user.language,
+            'gender': user.gender
         }
     }), 200
 
 @auth_bp.route('/conversations', methods=['GET'])
 def conversations():
-    """Fetch user's conversations with pagination."""
+    """Get all conversations for the authenticated user with pagination."""
     logger.debug("Received conversations request")
     user = verify_user_from_token(request.headers.get('Authorization'))
     if not user:
@@ -197,28 +156,35 @@ def conversations():
         return jsonify({'message': 'Invalid or missing token'}), 401
 
     try:
+        # Get pagination parameters
         page = int(request.args.get('page', 1))
         per_page = int(request.args.get('per_page', 10))
-        conversations = Conversation.query.filter_by(user_id=user.id)\
+
+        # Query conversations with messages, ordered by updated_at or created_at
+        query = Conversation.query.filter_by(user_id=user.id)\
             .filter(Conversation.messages != None, Conversation.messages != [])\
-            .order_by(Conversation.updated_at.desc().nullslast(), Conversation.created_at.desc())\
-            .paginate(page=page, per_page=per_page, error_out=False)
-        
-        response = {
+            .order_by(Conversation.updated_at.desc().nullslast(), Conversation.created_at.desc())
+
+        # Paginate the query
+        paginated_conversations = query.paginate(page=page, per_page=per_page, error_out=False)
+        conversations = paginated_conversations.items
+        total = paginated_conversations.total
+        pages = paginated_conversations.pages
+
+        logger.debug(f"Fetched {len(conversations)} conversations for user: {user.id}, page: {page}, total: {total}")
+        return jsonify({
             'conversations': [{
                 'id': conv.id,
                 'created_at': conv.created_at.isoformat(),
                 'updated_at': conv.updated_at.isoformat() if conv.updated_at else conv.created_at.isoformat(),
-                'title': next((msg['text'][:50] for msg in conv.messages if msg.get('isUser')), 'Untitled Conversation'),
                 'preview': conv.messages[-1]['text'][:100] if conv.messages and len(conv.messages) > 0 else 'No messages yet',
+                'title': conv.messages[0]['text'][:30] if conv.messages and len(conv.messages) > 0 else 'Untitled Conversation',
                 'message_count': len(conv.messages) if conv.messages else 0
-            } for conv in conversations.items],
-            'total': conversations.total,
-            'pages': conversations.pages,
+            } for conv in conversations],
+            'total': total,
+            'pages': pages,
             'current_page': page
-        }
-        logger.debug(f"Fetched {len(conversations.items)} conversations for page {page}")
-        return jsonify(response), 200
+        }), 200
     except Exception as e:
         logger.error(f"Error fetching conversations: {str(e)}")
         return jsonify({'message': f'Error fetching conversations: {str(e)}'}), 500
@@ -265,7 +231,7 @@ def conversation(conversation_id):
                 logger.error("Message is required")
                 return jsonify({'message': 'Message is required'}), 400
 
-            # Create new conversation if it doesn't exist
+            is_mic_input = data.get('isMicInput', False)
             if not conversation:
                 conversation = Conversation(
                     id=conversation_id,
@@ -320,6 +286,14 @@ def conversation(conversation_id):
             conversation.messages.append(ai_message)
             logger.debug(f"Added AI message: {ai_message}")
 
+            # Generate speech for mic-based inputs
+            audio_base64 = None
+            if is_mic_input:
+                language = patient_info.get('language', 'en')
+                audio_base64 = generate_tts_audio(ai_response_text, user.id, conversation.id, language)
+                if not audio_base64:
+                    logger.warning("Failed to generate speech, proceeding without audio")
+
             conversation.updated_at = datetime.datetime.now(datetime.timezone.utc)
             from sqlalchemy.orm.attributes import flag_modified
             flag_modified(conversation, "messages")
@@ -330,7 +304,8 @@ def conversation(conversation_id):
                 'created_at': conversation.created_at.isoformat(),
                 'updated_at': conversation.updated_at.isoformat(),
                 'messages': conversation.messages,
-                'preview': user_message['text'][:100]
+                'preview': user_message['text'][:100],
+                'audio': audio_base64 if is_mic_input else None
             }
             logger.debug(f"Returning response: {response}")
             return jsonify(response), 200
@@ -385,6 +360,26 @@ def latest_conversation():
                 logger.error("Message is required")
                 return jsonify({'message': 'Message is required'}), 400
 
+            is_mic_input = data.get('isMicInput', False)
+            # Handle empty message for new conversation (New Chat)
+            if data['message'] == '':
+                conversation = Conversation(
+                    user_id=user.id,
+                    messages=[],
+                    created_at=datetime.datetime.now(datetime.timezone.utc)
+                )
+                db.session.add(conversation)
+                db.session.commit()
+                logger.debug(f"Created new conversation with ID: {conversation.id}")
+                return jsonify({
+                    'id': conversation.id,
+                    'created_at': conversation.created_at.isoformat(),
+                    'updated_at': conversation.updated_at.isoformat() if conversation.updated_at else conversation.created_at.isoformat(),
+                    'messages': [],
+                    'preview': 'No messages yet',
+                    'audio': None
+                }), 200
+
             conversation = Conversation.query.filter_by(user_id=user.id)\
                 .filter(Conversation.messages != None, Conversation.messages != [])\
                 .order_by(Conversation.updated_at.desc().nullslast(), Conversation.created_at.desc())\
@@ -396,7 +391,7 @@ def latest_conversation():
                     created_at=datetime.datetime.now(datetime.timezone.utc)
                 )
                 db.session.add(conversation)
-                db.session.commit()  # Commit to generate integer ID
+                db.session.commit()
                 logger.debug(f"Created new conversation with ID: {conversation.id}")
 
             session_id = f"user_{user.id}_conv_{conversation.id}"
@@ -440,6 +435,14 @@ def latest_conversation():
             conversation.messages.append(ai_message)
             logger.debug(f"Added AI message: {ai_message}")
 
+            # Generate speech for mic-based inputs
+            audio_base64 = None
+            if is_mic_input:
+                language = patient_info.get('language', 'en')
+                audio_base64 = generate_tts_audio(ai_response_text, user.id, conversation.id, language)
+                if not audio_base64:
+                    logger.warning("Failed to generate speech, proceeding without audio")
+
             conversation.updated_at = datetime.datetime.now(datetime.timezone.utc)
             from sqlalchemy.orm.attributes import flag_modified
             flag_modified(conversation, "messages")
@@ -450,7 +453,8 @@ def latest_conversation():
                 'created_at': conversation.created_at.isoformat(),
                 'updated_at': conversation.updated_at.isoformat(),
                 'messages': conversation.messages,
-                'preview': user_message['text'][:100]
+                'preview': user_message['text'][:100],
+                'audio': audio_base64 if is_mic_input else None
             }
             logger.debug(f"Returning response: {response}")
             return jsonify(response), 200
@@ -459,38 +463,3 @@ def latest_conversation():
             db.session.rollback()
             logger.error(f"Error saving conversation: {str(e)}")
             return jsonify({'message': f'Error saving conversation: {str(e)}'}), 500
-
-@auth_bp.route('/conversation/new', methods=['POST'])
-def new_conversation():
-    """Create a new conversation with an integer ID."""
-    logger.debug("Received new conversation request")
-    user = verify_user_from_token(request.headers.get('Authorization'))
-    if not user:
-        logger.error("Invalid or missing token")
-        return jsonify({'message': 'Invalid or missing token'}), 401
-
-    try:
-        conversation = Conversation(
-            user_id=user.id,
-            messages=[],
-            created_at=datetime.datetime.now(datetime.timezone.utc)
-        )
-        db.session.add(conversation)
-        db.session.commit()  # Commit to generate integer ID
-        logger.debug(f"Created new conversation with ID: {conversation.id}")
-        return jsonify({
-            'id': conversation.id,
-            'created_at': conversation.created_at.isoformat(),
-            'updated_at': conversation.updated_at.isoformat() if conversation.updated_at else conversation.created_at.isoformat(),
-            'messages': [],
-            'preview': 'No messages yet'
-        }), 201
-    except Exception as e:
-        logger.error(f"Error creating new conversation: {str(e)}")
-        return jsonify({'message': f'Error creating new conversation: {str(e)}'}), 500
-
-@auth_bp.route('/test', methods=['GET'])
-def test():
-    """Test endpoint to verify API is running."""
-    logger.debug("Test route accessed")
-    return jsonify({'message': 'Test route working'}), 200

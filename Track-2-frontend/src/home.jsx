@@ -23,9 +23,11 @@ const Home = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [networkStatus, setNetworkStatus] = useState(navigator.onLine ? 'online' : 'offline');
+  const [isMicInput, setIsMicInput] = useState(false); // Track mic-based input
   const messagesEndRef = useRef(null);
   const silenceTimerRef = useRef(null);
   const messageIdCounter = useRef(1);
+  const wasListeningRef = useRef(false); // Track listening state before audio playback
 
   const { transcript, interimTranscript, finalTranscript, resetTranscript, listening } = useSpeechRecognition();
 
@@ -45,6 +47,49 @@ const Home = () => {
     localStorage.removeItem('chatMessages');
   };
 
+  // Remove emojis from text
+  const stripEmojis = (text) => {
+    const cleanText = text.replace(/[\p{Emoji}\p{Emoji_Presentation}\p{Emoji_Modifier}\p{Emoji_Modifier_Base}\p{Emoji_Component}\u{200D}\u{FE0F}]+/gu, '').trim();
+    console.log('Original text:', text, 'Cleaned text:', cleanText);
+    return cleanText;
+  };
+
+  // Play base64 audio
+  const playAudio = (base64Audio) => {
+    if (!base64Audio) {
+      console.log('No audio data to play');
+      return;
+    }
+    try {
+      const audio = new Audio(`data:audio/mp3;base64,${base64Audio}`);
+      audio.onplay = () => {
+        console.log('Audio playback started, isListening:', isListening);
+        if (isListening) {
+          wasListeningRef.current = true;
+          setIsListening(false);
+          SpeechRecognition.stopListening();
+          SpeechRecognition.abortListening();
+          console.log('Mic stopped during audio playback');
+        } else {
+          wasListeningRef.current = false;
+        }
+      };
+      audio.onended = () => {
+        console.log('Audio playback ended, wasListening:', wasListeningRef.current);
+        if (wasListeningRef.current && networkStatus === 'online') {
+          setIsListening(true);
+          SpeechRecognition.startListening({ continuous: true, interimResults: true, language: 'en-US' });
+          console.log('Mic restarted after audio playback');
+        }
+      };
+      audio.play().catch(error => {
+        console.error('Error playing audio:', error);
+      });
+    } catch (error) {
+      console.error('Error setting up audio:', error);
+    }
+  };
+
   const handleToggleListening = () => {
     console.log('Toggling listening:', isListening ? 'Stopping' : 'Starting');
     if (networkStatus === 'offline') {
@@ -54,13 +99,16 @@ const Home = () => {
 
     if (isListening) {
       setIsListening(false);
+      setIsMicInput(false);
       SpeechRecognition.stopListening();
+      SpeechRecognition.abortListening();
       resetTranscript();
       if (silenceTimerRef.current) {
         clearTimeout(silenceTimerRef.current);
       }
     } else {
       setIsListening(true);
+      setIsMicInput(true); // Flag mic input
       resetTranscript();
       SpeechRecognition.startListening({ 
         continuous: true, 
@@ -154,7 +202,9 @@ const Home = () => {
       setNetworkStatus(navigator.onLine ? 'online' : 'offline');
       if (!navigator.onLine && isListening) {
         setIsListening(false);
+        setIsMicInput(false);
         SpeechRecognition.stopListening();
+        SpeechRecognition.abortListening();
         resetTranscript();
         if (silenceTimerRef.current) {
           clearTimeout(silenceTimerRef.current);
@@ -175,7 +225,7 @@ const Home = () => {
   }, [isListening]);
 
   const handleSendMessage = (text) => {
-    console.log('handleSendMessage called with text:', text);
+    console.log('handleSendMessage called with text:', text, 'isMicInput:', isMicInput);
     const token = localStorage.getItem('token');
     if (!token) {
       console.error('No token found in localStorage');
@@ -185,6 +235,9 @@ const Home = () => {
         isUser: false,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       }]);
+      if (isMicInput) {
+        playAudio(null); // No audio for error message
+      }
       return;
     }
 
@@ -205,14 +258,14 @@ const Home = () => {
       ? `http://localhost:5000/api/auth/conversation/${conversationId}`
       : 'http://localhost:5000/api/auth/conversation';
 
-    console.log('Sending POST request to:', url, 'with body:', { message: text });
+    console.log('Sending POST request to:', url, 'with body:', { message: text, isMicInput });
     fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`,
       },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify({ message: text, isMicInput }),
     })
       .then((res) => {
         console.log('POST response status:', res.status);
@@ -233,6 +286,12 @@ const Home = () => {
           console.log('Setting formatted messages:', formattedMessages);
           setMessages(formattedMessages);
           messageIdCounter.current = formattedMessages.length + 1;
+          // Play AI response audio if input was from mic
+          if (isMicInput && data.audio) {
+            const cleanText = stripEmojis(data.messages.find(msg => !msg.isUser && msg.timestamp === data.messages[data.messages.length - 1].timestamp)?.text);
+            console.log('Playing audio for cleaned text:', cleanText);
+            playAudio(data.audio);
+          }
           if (!isValidId && data.id) {
             console.log('Navigating to new conversation ID:', data.id);
             navigate(`/chat/${data.id}`);
@@ -246,12 +305,14 @@ const Home = () => {
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           };
           setMessages((prev) => [...prev, errorResponse]);
+          if (isMicInput) {
+            playAudio(null); // No audio for error
+          }
         }
       })
       .catch((error) => {
         console.error('Error sending message:', error);
         setShowStatus(false);
-        setMessages((prev) => [...prev]);
         const errorResponse = {
           id: generateUniqueId(),
           text: `Failed to connect to server: ${error.message}. Your message was sent but not saved. Please try again.`,
@@ -259,7 +320,12 @@ const Home = () => {
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
         setMessages((prev) => [...prev, errorResponse]);
+        if (isMicInput) {
+          playAudio(null); // No audio for error
+        }
       });
+    // Reset mic input flag after sending
+    setIsMicInput(false);
   };
 
   return (
