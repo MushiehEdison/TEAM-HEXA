@@ -1,18 +1,38 @@
-please we have a little issue with our register but if you register and you see a page error just go to login and use the infos which you used in registering to login you will have access to your account.
+Healia - AI-Powered Medical Assistant
 
-so to access admin panel 
+Healia is a web-based medical assistant application designed for Cameroonian patients, providing empathetic and context-aware responses to health-related queries. Built with React, Flask, and Grok API, it supports text and voice input, dynamically detects the user's language (English or French), and delivers culturally appropriate medical advice. The app includes conversation memory, symptom/condition extraction, and text-to-speech (TTS) for voice responses.
 
-username: newstaff
+Features
 
-pass: password
 
-and to access patient dashboard you can use this credentials to login directly: 
 
-email:mary@gmail.com
-dateofbirth:03/10/2005
-or
-email:mushiehedison66@gmail.com
-dateofbirth:2024-07-04
 
-to access the the admin login click on the icon on the home page 
+
+Dynamic Language Detection: Automatically detects whether the user speaks English or French based on input and responds in the same language.
+
+
+
+Voice Input/Output: Supports voice queries via Web Speech API and generates audio responses using Eleven Labs TTS (English and French voices).
+
+
+
+Conversation Memory: Tracks user symptoms, conditions, emotional state, and topics for personalized responses.
+
+
+
+Clinical Dataset Integration: Queries a local dataset (clinical_summaries.csv) for relevant medical insights based on mentioned symptoms/conditions.
+
+
+
+Empathetic Responses: Uses sentiment analysis to tailor responses with empathy, incorporating emojis (😊, 😔, 🤗, 🙏).
+
+
+
+Cultural Context: Provides practical advice tailored to the Cameroonian healthcare context.
+
+
+
+Secure Authentication: Uses JWT-based authentication for user sessions.
+
+
 TEAM HEXA
