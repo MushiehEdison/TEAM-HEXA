@@ -1,0 +1,2 @@
+[2025-08-06 19:28:38] INFO: System initialized Context: {"user_ip":"::1","user_agent":"Mozilla\/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit\/537.36 (KHTML, like Gecko) Chrome\/138.0.0.0 Safari\/537.36","request_uri":"\/bloodbank\/pages\/forecasting.php"}
+[2025-08-06 19:28:38] ERROR: Uncaught exception: Call to undefined function isLoggedIn() Context: {"file":"C:\\wamp64\\www\\bloodbank\\pages\\forecasting.php","line":4,"trace":"#0 {main}"}
